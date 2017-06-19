@@ -101,12 +101,16 @@ my $ad_opt = " -bgc_spinup";
 my $bldnml_opts = $CLM_BLDNML_OPTS;
 if ( ($CLM_ACCELERATED_SPINUP eq "on") && (index($bldnml_opts, $ad_opt) == -1) ) { 
   $ad_opt = " -bgc_spinup on"; 
+
   if ( (index($COMPSET, "1850") != -1) && (index($bldnml_opts, "-bgc cn") != -1) ) {
+  
     $CLM_BLDNML_OPTS = $bldnml_opts.$ad_opt;
-    print "INFO - edited CLM_BLDNML_OPTS: ".$CLM_BLDNML_OPTS."\n";
+    print "edited CLM_BLDNML_OPTS: ".$CLM_BLDNML_OPTS."\n";
+  
   } else {
     print "WARNING: ".$ad_opt."NOT VALID for compset".$COMPSET.", OR CLM_BLDNML_OPTS".$bldnml_opts."\n";
   }
+
 } else {
   if ( ($CLM_ACCELERATED_SPINUP eq "on") && (index($bldnml_opts, $ad_opt) != -1) ) {
     print "WARNING: cannot over-ride CLM_BLDNML_OPTS: ".$CLM_BLDNML_OPTS."\n";

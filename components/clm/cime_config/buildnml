@@ -133,7 +133,7 @@ if ( ($CLM_INTERFACE_MODE ne "off") && (index($bldnml_opts, $interface_opt) == -
    $interface_opt = " -clm_interface_mode ".$CLM_INTERFACE_MODE;     
    if (index($COMPSET, "CLM45") != -1) {
       $CLM_BLDNML_OPTS = $bldnml_opts.$interface_opt;
-      print "INFO - edited CLM_BLDNML_OPTS: ".$CLM_BLDNML_OPTS."\n";
+      print "INFO - ' ".$interface_opt."' added into CLM_BLDNML_OPTS: ".$CLM_BLDNML_OPTS."\n";  
    } else {
     print "WARNING: ".$interface_opt."NOT VALID for compset".$COMPSET."\n";
    }

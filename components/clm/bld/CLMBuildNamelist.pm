@@ -3429,7 +3429,7 @@ sub setup_logic_snowpack {
 #-------------------------------------------------------------------------------
 sub setup_logic_pflotran {
     # clm_pflotran_inparm
-    # PFLOTRAN model if bgc=CN or CNDV and CLM4.5 physics
+    # PFLOTRAN model if CLM4.5 physics
     #
     my ($test_files, $nl_flags, $definition, $defaults, $nl, $physv) = @_;
 

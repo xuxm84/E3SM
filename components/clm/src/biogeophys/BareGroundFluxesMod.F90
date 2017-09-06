@@ -136,6 +136,8 @@ contains
          t_h2osfc         =>    temperature_vars%t_h2osfc_col         , & ! Input:  [real(r8) (:)   ]  surface water temperature                                             
          beta             =>    temperature_vars%beta_col             , & ! Input:  [real(r8) (:)   ]  coefficient of conective velocity [-]                                 
 
+         t_nearsurf       =>    temperature_vars%t_nearsurf_patch     , & ! Output: [real(r8) (:)   ]  mixed air/veg. temperature [K] near surface (for coupling with PFLOTRAN as BC)
+
          frac_sno         =>    waterstate_vars%frac_sno_col          , & ! Input:  [real(r8) (:)   ]  fraction of ground covered by snow (0 to 1)                           
          qg_snow          =>    waterstate_vars%qg_snow_col           , & ! Input:  [real(r8) (:)   ]  specific humidity at snow surface [kg/kg]                             
          qg_soil          =>    waterstate_vars%qg_soil_col           , & ! Input:  [real(r8) (:)   ]  specific humidity at soil surface [kg/kg]                             
@@ -312,6 +314,10 @@ contains
          eflx_sh_snow(p)   = -raih*(thm(p)-t_soisno(c,snl(c)+1))
          eflx_sh_soil(p)   = -raih*(thm(p)-t_soisno(c,1))
          eflx_sh_h2osfc(p) = -raih*(thm(p)-t_h2osfc(c))
+
+         ! save 'thm' for using as top soil thermal BC for coupling with PFLOTRAN subsurface
+         ! because here it's used for SH calculation for non-veg-covered bare-soil patch
+         t_nearsurf(p)    = thm(p)
 
          ! water fluxes from soil
          qflx_evap_soi(p)  = -raiw*dqh(p)

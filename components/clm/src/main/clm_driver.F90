@@ -26,7 +26,7 @@ module clm_driver
   use BalanceCheckMod        , only : BeginWaterBalance, BalanceCheck
   !
   use CanopyTemperatureMod   , only : CanopyTemperature ! (formerly Biogeophysics1Mod)
-  use SoilTemperatureMod     , only : SoilTemperature
+  use SoilTemperatureMod     , only : SoilTemperature, SoilThermalPostPflotran
   use LakeTemperatureMod     , only : LakeTemperature
   !
   use BareGroundFluxesMod    , only : BareGroundFluxes
@@ -35,7 +35,7 @@ module clm_driver
   use UrbanFluxesMod         , only : UrbanFluxes 
   use LakeFluxesMod          , only : LakeFluxes
   !
-  use HydrologyNoDrainageMod , only : HydrologyNoDrainage ! (formerly Hydrology2Mod)
+  use HydrologyNoDrainageMod , only : HydrologyNoDrainage, HydrologyPostPFLOTRAN ! (formerly Hydrology2Mod)
   use HydrologyDrainageMod   , only : HydrologyDrainage   ! (formerly Hydrology2Mod)
   use CanopyHydrologyMod     , only : CanopyHydrology     ! (formerly Hydrology1Mod)
   use LakeHydrologyMod       , only : LakeHydrology
@@ -126,7 +126,7 @@ module clm_driver
   use shr_log_mod            , only : errMsg => shr_log_errMsg
 
   !----------------------------------------------------------------------------
-  ! bgc interface & pflotran:
+  ! clm interface & pflotran:
   use clm_varctl             , only : use_clm_interface
   use clm_instMod            , only : clm_interface_data
   use clm_interface_funcsMod , only : get_clm_data
@@ -835,6 +835,28 @@ contains
                            waterstate_vars, waterflux_vars,                     &
                            temperature_vars, energyflux_vars,                   &
                            soilstate_vars, soilhydrology_vars)
+
+                       if (pf_hmode) then
+                           call HydrologyPostPFLOTRAN(bounds_clump,                  &
+                               filter(nc)%num_nolakec, filter(nc)%nolakec,           &
+                               filter(nc)%num_hydrologyc, filter(nc)%hydrologyc,     &
+                               filter(nc)%num_hydrononsoic, filter(nc)%hydrononsoic, &
+                               filter(nc)%num_urbanc, filter(nc)%urbanc,             &
+                               filter(nc)%num_snowc, filter(nc)%snowc,               &
+                               filter(nc)%num_nosnowc, filter(nc)%nosnowc,           &
+                               soilstate_vars, temperature_vars,                     &
+                               waterflux_vars, waterstate_vars, soilhydrology_vars,  &
+                               aerosol_vars, soil_water_retention_curve)
+
+                       end if
+
+                       if (pf_tmode) then
+                           call SoilThermalPostPflotran(bounds_clump,                &
+                               filter(nc)%num_nolakec, filter(nc)%nolakec,           &
+                               urbanparams_vars, waterstate_vars, waterflux_vars,    &
+                               soilstate_vars, energyflux_vars,  temperature_vars)
+                       end if
+
                     end if
 
                     call t_stopf('pflotran')

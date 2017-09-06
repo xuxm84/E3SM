@@ -223,7 +223,8 @@ contains
     !
     ! !USES:
     use CNDecompCascadeConType, only : decomp_cascade_con
-    !
+    use clm_varcon            , only : tkice, thk_bedrock
+
     ! !ARGUMENTS:
 
     implicit none
@@ -255,8 +256,13 @@ contains
          sucsat             => soilstate_vars%sucsat_col                            , & !  [real(r8) (:,:)]  minimum soil suction (mm) (nlevgrnd)
          watsat             => soilstate_vars%watsat_col                            , & !  [real(r8) (:,:)]  volumetric soil water at saturation (porosity) (nlevgrnd)
          watfc              => soilstate_vars%watfc_col                             , & !  [real(r8) (:,:)]  volumetric soil water at saturation (porosity) (nlevgrnd)
-         watmin             => soilstate_vars%watmin_col                            , & !   col minimum volumetric soil water (nlevsoi)
-         sucmin             => soilstate_vars%sucmin_col                            , & !   col minimum allowable soil liquid suction pressure (mm) [Note: sucmin_col is a negative value, while sucsat_col is a positive quantity]
+         watmin             => soilstate_vars%watmin_col                            , & !  [real(r8) (:,:)]  col minimum volumetric soil water (nlevsoi)
+         sucmin             => soilstate_vars%sucmin_col                            , & !  [real(r8) (:,:)]  col minimum allowable soil liquid suction pressure (mm) [Note: sucmin_col is a negative value, while sucsat_col is a positive quantity]
+         !
+         tkmg               => soilstate_vars%tkmg_col                              , & !  [real(r8) (:,:)]  ! col thermal conductivity, soil minerals  [W/m-K] (nlevgrnd)
+         tkdry              => soilstate_vars%tkdry_col                             , & !  [real(r8) (:,:)]  ! col thermal conductivity, dry soil [W/m-K] (nlevgrnd)
+         tksatu             => soilstate_vars%tksatu_col                            , & !  [real(r8) (:,:)]  ! col thermal conductivity, saturated soil [W/m-K] (nlevgrnd)
+         hcsoil             => soilstate_vars%csol_col                              , & !  [real(r8) (:,:)]  ! col heat capacity, soil solids (J/m**3/Kelvin) (nlevgrnd)
          !
          cellorg            => soilstate_vars%cellorg_col                           , & !  Input:  [real(r8) (:,:)  ]  column 3D org (kg/m3 organic matter) (nlevgrnd)
          !
@@ -311,6 +317,11 @@ contains
         clm_idata%cellorg_col(c,:)       = cellorg(c,:)
 
         clm_idata%rootfr_col(c,:)        = rootfr(c,:)
+
+        clm_idata%tkwet_col(c,:)         = tksatu(c,:)
+        clm_idata%tkdry_col(c,:)         = tkdry(c,:)
+        clm_idata%tkfrz_col(c,:)         = tkice
+        clm_idata%csol_col(c,:)          = hcsoil(c,:)
 
         !
         do k = 1, ndecomp_cascade_transitions

@@ -101,11 +101,13 @@ module SoilTemperatureMod
   public :: SetMatrix_StandingSurfaceWater_Soil ! Set up the matrix entries corresponding to standing surface water-soil interaction
   public :: SetMatrix_Soil_StandingSurfaceWater ! Set up the matrix entries corresponding to soil-standing surface water interction
   public :: init_soil_temperature               ! Initializes soil tempreature model
+  public :: SoilThermalPostPflotran
   !
   ! !PRIVATE MEMBER FUNCTIONS:
   private :: SoilThermProp      ! Set therm conduct. and heat cap of snow/soil layers
   private :: PhaseChangeH2osfc  ! When surface water freezes move ice to bottom snow layer
   private :: PhaseChange_beta   ! Calculation of the phase change within snow and soil layers
+  private :: PhaseChange_snow   ! Calculation of the phase change within snow layers
   integer, parameter :: default_thermal_model  = 0
   integer, parameter :: petsc_thermal_model    = 1
   integer            :: thermal_model
@@ -166,7 +168,8 @@ contains
     use ExternalModelConstants   , only : EM_ID_PTM
     use ExternalModelConstants   , only : EM_PTM_TBASED_SOLVE_STAGE
     use ExternalModelInterfaceMod, only : EMI_Driver
-    !
+    use clm_varctl               , only : use_pflotran, pf_tmode, pf_surfaceflow
+
     ! !ARGUMENTS:
     type(bounds_type)      , intent(in)    :: bounds                     
     integer                , intent(in)    :: num_nolakec                        ! number of column non-lake points in column filter
@@ -218,6 +221,8 @@ contains
     integer, pointer :: filter_lun(:)
     logical  :: urban_column
     logical  :: update_temperature
+    logical  :: PF_ONOFF(bounds%begc:bounds%endc)                           ! a local column indicator for pflotran-running columns
+    !
     !-----------------------------------------------------------------------
 
     associate(                                                                   & 
@@ -274,6 +279,9 @@ contains
          eflx_building_heat      => energyflux_vars%eflx_building_heat_col  , & ! Output: [real(r8) (:)   ]  heat flux from urban building interior to walls, roof (W/m**2)
          eflx_urban_ac           => energyflux_vars%eflx_urban_ac_col       , & ! Output: [real(r8) (:)   ]  urban air conditioning flux (W/m**2)    
          eflx_urban_heat         => energyflux_vars%eflx_urban_heat_col     , & ! Output: [real(r8) (:)   ]  urban heating flux (W/m**2)             
+
+         eflx_fgr0_snow          => energyflux_vars%eflx_fgr0_snow_col      , & ! Output: [real(r8) (:)   ]  heat flux between soil layer 1 and above-snow (W/m2)
+         eflx_fgr0_h2osfc        => energyflux_vars%eflx_fgr0_h2osfc_col    , & ! Output: [real(r8) (:)   ]  heat flux between soil layer 1 and above-surface water (W/m2)
          
          emg                     => temperature_vars%emg_col                , & ! Input:  [real(r8) (:)   ]  ground emissivity                       
          hc_soi                  => temperature_vars%hc_soi_col             , & ! Input:  [real(r8) (:)   ]  soil heat content (MJ/m2)               ! TODO: make a module variable
@@ -436,6 +444,26 @@ contains
          tvector_urbanc(c,1:nlevgrnd)   = t_soisno(c,1:nlevgrnd)
       enddo
 
+      ! if coupled with pflotran, truncating the bottom layer at the 1st soil layer, for 'nourbanc' in 'nolakec'
+      ! so that the solver will only work on ground surface water/snow columns with 1st soil layer as bottom boundary
+      ! (but will not change properties calculations)
+      PF_ONOFF(begc:endc) = .false.
+      if (use_pflotran .and. pf_tmode) then
+         do fc = 1,num_nolakec_and_nourbanc
+            c = filter_nolakec_and_nourbanc(fc)
+            jbot(c) = 1
+            PF_ONOFF(c) = .true.
+
+            ! assuming NO heat diffusion flux below first soil, i.e. the first soil layer as bottom boundary of snow only
+            j = jbot(c)
+            fn(c,j) = 0._r8
+
+         end do
+      end if
+      ! initializing the following to zero
+      ! (esp. for eflx_fgr0_snow, which will be updated in 'Phasechange_snow' and after solve temperature for snow.)
+      eflx_fgr0_snow(begc:endc)   = 0._r8
+      eflx_fgr0_h2osfc(begc:endc) = 0._r8
 
       !
       ! Solve temperature for non-lake + non-urban columns
@@ -498,7 +526,7 @@ contains
       end select
 
       !
-      ! Solve temperature for lake + urban column
+      ! Solve temperature for non-lake + urban column
       !
 
       urban_column = .true.
@@ -535,6 +563,8 @@ contains
             do j = snl(c)+1, 0
                t_soisno(c,j)       = tvector_urbanc(c,j-1)        !snow layers
             end do
+
+            if (.not. PF_ONOFF(c)) &
             t_soisno(c,1:nlevgrnd) = tvector_urbanc(c,1:nlevgrnd) !soil layers
             
             if (frac_h2osfc(c) == 0._r8) then
@@ -549,6 +579,8 @@ contains
                do j = snl(c)+1, 0
                   t_soisno(c,j)       = tvector_nourbanc(c,j-1)        !snow layers
                end do
+
+               if (.not. PF_ONOFF(c)) &
                t_soisno(c,1:nlevgrnd) = tvector_nourbanc(c,1:nlevgrnd) !soil layers
 
                if (frac_h2osfc(c) == 0._r8) then
@@ -624,13 +656,42 @@ contains
          xmf_h2osfc(c) = 0.
       end do
 
-      call PhaseChangeH2osfc (bounds, num_nolakec, filter_nolakec, &
+      if (use_pflotran .and. pf_tmode) then
+
+        if (.not. pf_surfaceflow) then
+          ! currently 'pflotran' surface thermal-hydrology not yet coupled
+          call PhaseChangeH2osfc (bounds, num_nolakec, filter_nolakec, &
+               dhsdT(bounds%begc:bounds%endc), &
+               waterstate_vars, waterflux_vars, temperature_vars)
+
+          ! only run 'snow-layers' of all 'nourbanc' in 'nolakec'
+          call Phasechange_snow (bounds, num_nolakec_and_nourbanc, filter_nolakec_and_nourbanc, &
+               dhsdT(bounds%begc:bounds%endc), &
+               soilstate_vars, waterstate_vars, waterflux_vars, energyflux_vars, temperature_vars)
+
+        else
+          ! if 'pflotran' surface thermal-hydrology mode coupled (TODO), run original only for 'urbanc' in 'nolakec'
+          call PhaseChangeH2osfc (bounds, num_nolakec_and_urbanc, filter_nolakec_and_urbanc, &
+               dhsdT(bounds%begc:bounds%endc), &
+               waterstate_vars, waterflux_vars, temperature_vars)
+
+        end if
+
+        ! need to run for 'urbanc' in 'nolakec', when coupling with PFLOTRAN
+        call Phasechange_beta (bounds, num_nolakec_and_urbanc, filter_nolakec_and_urbanc, &
+           dhsdT(bounds%begc:bounds%endc), &
+           soilstate_vars, waterstate_vars, waterflux_vars, energyflux_vars, temperature_vars)
+
+      else
+
+        call PhaseChangeH2osfc (bounds, num_nolakec, filter_nolakec, &
            dhsdT(bounds%begc:bounds%endc), &
            waterstate_vars, waterflux_vars, temperature_vars)
 
-      call Phasechange_beta (bounds, num_nolakec, filter_nolakec, &
+        call Phasechange_beta (bounds, num_nolakec, filter_nolakec, &
            dhsdT(bounds%begc:bounds%endc), &
            soilstate_vars, waterstate_vars, waterflux_vars, energyflux_vars, temperature_vars)
+      end if
 
       do fc = 1,num_nolakec
          c = filter_nolakec(fc)
@@ -672,6 +733,21 @@ contains
          do fc = 1,num_nolakec
             c = filter_nolakec(fc)
             l = col_pp%landunit(c)
+
+            ! for coupling with PFLOTRAN, need to know heat flux between snow/surface-water and first soil layer
+            ! IF surface process is NOT coupled
+            if ( j==0 .and. (lun_pp%itype(l) == istsoil .or. lun_pp%itype(l) == istcrop) ) then
+               if (snl(c)<0) then
+                  eflx_fgr0_snow(c) = -cnfac*fn(c,0) - (1._r8-cnfac)*fn1(c,0) &
+                       + eflx_fgr0_snow(c) ! 'eflx_fgr0_snow' must be initialized to 0, and updated in 'Phasechange_snow'
+               endif
+
+               if(frac_h2osfc(c) /= 0._r8) then
+                  eflx_fgr0_h2osfc(c) = -cnfac*fn_h2osfc(c) - (1._r8-cnfac)   &
+                       * (tk_h2osfc(c)*(t_soisno(c,1)-t_h2osfc(c))/(0.5*dz_h2osfc(c)+z(c,1)))
+               endif
+
+            endif
 
             if (j == 1) then ! this only needs to be done once
                eflx_fgr12(c) = -cnfac*fn(c,1) - (1._r8-cnfac)*fn1(c,1)
@@ -900,11 +976,11 @@ end subroutine SolveTemperature
          h2osno       =>    waterstate_vars%h2osno_col	     , & ! Input:  [real(r8) (:)   ]  snow water (mm H2O)                     
          h2osoi_liq   =>    waterstate_vars%h2osoi_liq_col   , & ! Input:  [real(r8) (:,:) ]  liquid water (kg/m2)                  
          h2osoi_ice   =>    waterstate_vars%h2osoi_ice_col   , & ! Input:  [real(r8) (:,:) ]  ice lens (kg/m2)                      
-         bw           =>    waterstate_vars%bw_col	     , & ! Output: [real(r8) (:,:) ]  partial density of water in the snow pack (ice + liquid) [kg/m3] 
+         bw           =>    waterstate_vars%bw_col	         , & ! Output: [real(r8) (:,:) ]  partial density of water in the snow pack (ice + liquid) [kg/m3]
          
-         tkmg         =>    soilstate_vars%tkmg_col	     , & ! Input:  [real(r8) (:,:) ]  thermal conductivity, soil minerals  [W/m-K]
+         tkmg         =>    soilstate_vars%tkmg_col	         , & ! Input:  [real(r8) (:,:) ]  thermal conductivity, soil minerals  [W/m-K]
          tkdry        =>    soilstate_vars%tkdry_col	     , & ! Input:  [real(r8) (:,:) ]  thermal conductivity, dry soil (W/m/Kelvin)
-         csol         =>    soilstate_vars%csol_col	     , & ! Input:  [real(r8) (:,:) ]  heat capacity, soil solids (J/m**3/Kelvin)
+         csol         =>    soilstate_vars%csol_col	         , & ! Input:  [real(r8) (:,:) ]  heat capacity, soil solids (J/m**3/Kelvin)
          watsat       =>    soilstate_vars%watsat_col	     , & ! Input:  [real(r8) (:,:) ]  volumetric soil water at saturation (porosity)
          tksatu       =>    soilstate_vars%tksatu_col	     , & ! Input:  [real(r8) (:,:) ]  thermal conductivity, saturated soil [W/m-K]
          thk          =>    soilstate_vars%thk_col             & ! Output: [real(r8) (:,:) ]  thermal conductivity of each layer  [W/m-K] 
@@ -1641,6 +1717,322 @@ end subroutine SolveTemperature
   end subroutine Phasechange_beta
 
   !-----------------------------------------------------------------------
+  subroutine Phasechange_snow (bounds, num_nolakec, filter_nolakec, dhsdT, &
+       soilstate_vars, waterstate_vars, waterflux_vars, energyflux_vars, temperature_vars)
+    !
+    ! !DESCRIPTION:
+    ! Calculation of the phase change within snow layers:
+    ! (1) Check the conditions for which the phase change may take place,
+    !     i.e., the layer temperature is great than the freezing point
+    !     and the ice mass is not equal to zero (i.e. melting),
+    !     or the layer temperature is less than the freezing point
+    !     and the liquid water mass is greater than the allowable supercooled
+    !     liquid water calculated from freezing point depression (i.e. freezing).
+    ! (2) Assess the rate of phase change from the energy excess (or deficit)
+    !     after setting the layer temperature to freezing point.
+    ! (3) Re-adjust the ice and liquid mass, and the layer temperature
+    !
+    ! !USES:
+    use clm_time_manager , only : get_step_size
+    use clm_varpar       , only : nlevsno, nlevurb, nlevgrnd
+    use clm_varctl       , only : iulog
+    use clm_varcon       , only : tfrz, hfus, grav
+    use column_varcon    , only : icol_roof, icol_sunwall, icol_shadewall, icol_road_perv
+    use landunit_varcon  , only : istsoil, istcrop, istice_mec
+    !
+    ! !ARGUMENTS:
+    type(bounds_type)      , intent(in)    :: bounds
+    integer                , intent(in)    :: num_nolakec                          ! number of column non-lake points in column filter
+    integer                , intent(in)    :: filter_nolakec(:)                    ! column filter for non-lake points
+    real(r8)               , intent(in)    :: dhsdT ( bounds%begc: )               ! temperature derivative of "hs" [col]
+    type(soilstate_type)   , intent(in)    :: soilstate_vars
+    type(waterstate_type)  , intent(inout) :: waterstate_vars
+    type(waterflux_type)   , intent(inout) :: waterflux_vars
+    type(energyflux_type)  , intent(inout) :: energyflux_vars
+    type(temperature_type) , intent(inout) :: temperature_vars
+    !
+    ! !LOCAL VARIABLES:
+    integer  :: j,c,g,l                            !do loop index
+    integer  :: fc                                 !lake filtered column indices
+    real(r8) :: dtime                              !land model time step (sec)
+    real(r8) :: heatr                              !energy residual or loss after melting or freezing
+    real(r8) :: temp1                              !temporary variables [kg/m2]
+    real(r8) :: hm(bounds%begc:bounds%endc,-nlevsno+1:1)    !energy residual [W/m2]
+    real(r8) :: xm(bounds%begc:bounds%endc,-nlevsno+1:1)    !melting or freezing within a time step [kg/m2]
+    real(r8) :: wmass0(bounds%begc:bounds%endc,-nlevsno+1:1)!initial mass of ice and liquid (kg/m2)
+    real(r8) :: wice0 (bounds%begc:bounds%endc,-nlevsno+1:1)!initial mass of ice (kg/m2)
+    real(r8) :: wliq0 (bounds%begc:bounds%endc,-nlevsno+1:1)!initial mass of liquid (kg/m2)
+    real(r8) :: propor                             !proportionality constant (-)
+    real(r8) :: tinc(bounds%begc:bounds%endc,-nlevsno+1:1)  !t(n+1)-t(n) (K)
+    real(r8) :: smp                                !frozen water potential (mm)
+    !-----------------------------------------------------------------------
+
+    call t_startf( 'PhaseChangeSnow' )
+
+    ! Enforce expected array sizes
+    SHR_ASSERT_ALL((ubound(dhsdT) == (/bounds%endc/)), errMsg(__FILE__, __LINE__))
+
+    associate(                                                        &
+         snl              =>    col_pp%snl                          , & ! Input:  [integer  (:)   ] number of snow layers
+         dz               =>    col_pp%dz                           , & ! Input:  [real(r8) (:,:) ] layer thickness (m)
+
+         frac_sno_eff     =>    waterstate_vars%frac_sno_eff_col    , & ! Input:  [real(r8) (:)   ] eff. fraction of ground covered by snow (0 to 1)
+         frac_sno         =>    waterstate_vars%frac_sno_col        , & ! Input:  [real(r8) (:)   ] fraction of ground covered by snow (0 to 1)
+         frac_h2osfc      =>    waterstate_vars%frac_h2osfc_col     , & ! Input:  [real(r8) (:)   ] fraction of ground covered by surface water (0 to 1)
+         snow_depth       =>    waterstate_vars%snow_depth_col      , & ! Input:  [real(r8) (:)   ] snow height (m)
+         h2osno           =>    waterstate_vars%h2osno_col          , & ! Output: [real(r8) (:)   ] snow water (mm H2O)
+         h2osoi_liq       =>    waterstate_vars%h2osoi_liq_col      , & ! Output: [real(r8) (:,:) ] liquid water (kg/m2) (new)
+         h2osoi_ice       =>    waterstate_vars%h2osoi_ice_col      , & ! Output: [real(r8) (:,:) ] ice lens (kg/m2) (new)
+
+         qflx_snow_melt   =>    waterflux_vars%qflx_snow_melt_col   , & ! Output: [real(r8) (:)   ] net snow melt
+         qflx_snofrz_lyr  =>    waterflux_vars%qflx_snofrz_lyr_col  , & ! Output: [real(r8) (:,:) ] snow freezing rate (positive definite) (col,lyr) [kg m-2 s-1]
+         qflx_snofrz_col  =>    waterflux_vars%qflx_snofrz_col      , & ! Output: [real(r8) (:)   ] column-integrated snow freezing rate (positive definite) [kg m-2 s-1]
+         qflx_glcice      =>    waterflux_vars%qflx_glcice_col      , & ! Output: [real(r8) (:)   ] flux of new glacier ice (mm H2O/s) [+ = ice grows]
+         qflx_glcice_melt =>    waterflux_vars%qflx_glcice_melt_col , & ! Output: [real(r8) (:)   ] ice melt (positive definite) (mm H2O/s)
+         qflx_snomelt     =>    waterflux_vars%qflx_snomelt_col     , & ! Output: [real(r8) (:)   ] snow melt (mm H2O /s)
+
+         eflx_snomelt     =>    energyflux_vars%eflx_snomelt_col    , & ! Output: [real(r8) (:)   ] snow melt heat flux (W/m**2)
+         eflx_snomelt_r   =>    energyflux_vars%eflx_snomelt_r_col  , & ! Output: [real(r8) (:)   ] rural snow melt heat flux (W/m**2)
+         eflx_snomelt_u   =>    energyflux_vars%eflx_snomelt_u_col  , & ! Output: [real(r8) (:)   ] urban snow melt heat flux (W/m**2)
+         eflx_fgr0_snow   =>    energyflux_vars%eflx_fgr0_snow_col  , & ! Output: [real(r8) (:)   ] heat flux between soil layer 1 and above-snow (W/m2)
+
+         xmf              =>    temperature_vars%xmf_col            , &
+         fact             =>    temperature_vars%fact_col           , &
+
+         imelt            =>    temperature_vars%imelt_col          , & ! Output: [integer  (:,:) ] flag for melting (=1), freezing (=2), Not=0 (new)
+         t_soisno         =>    temperature_vars%t_soisno_col         & ! Output: [real(r8) (:,:) ] soil temperature (Kelvin)
+         )
+
+      ! Get step size
+
+      dtime = get_step_size()
+
+      ! Initialization
+
+      do fc = 1,num_nolakec
+         c = filter_nolakec(fc)
+         l = col_pp%landunit(c)
+
+         qflx_snomelt(c) = 0._r8
+         xmf(c) = 0._r8
+         qflx_snofrz_lyr(c,-nlevsno+1:0) = 0._r8
+         qflx_snofrz_col(c) = 0._r8
+         qflx_snow_melt(c) = 0._r8
+      end do
+
+      do j = -nlevsno+1,1
+         do fc = 1,num_nolakec
+            c = filter_nolakec(fc)
+            if (j >= snl(c)+1) then
+
+               ! Initialization
+               imelt(c,j) = 0
+               hm(c,j) = 0._r8
+               xm(c,j) = 0._r8
+               wice0(c,j) = h2osoi_ice(c,j)
+               wliq0(c,j) = h2osoi_liq(c,j)
+               wmass0(c,j) = h2osoi_ice(c,j) + h2osoi_liq(c,j)
+            endif   ! end of snow layer if-block
+         end do   ! end of column-loop
+      enddo   ! end of level-loop
+
+      do j = -nlevsno+1,0
+         do fc = 1,num_nolakec
+            c = filter_nolakec(fc)
+            if (j >= snl(c)+1) then
+
+               ! Melting identification
+               ! If ice exists above melt point, melt some to liquid.
+               if (h2osoi_ice(c,j) > 0._r8 .AND. t_soisno(c,j) > tfrz) then
+                  imelt(c,j) = 1
+                  !
+                  tinc(c,j) = tfrz - t_soisno(c,j)
+                  t_soisno(c,j) = tfrz
+               endif
+
+               ! Freezing identification
+               ! If liquid exists below melt point, freeze some to ice.
+               if (h2osoi_liq(c,j) > 0._r8 .AND. t_soisno(c,j) < tfrz) then
+                  imelt(c,j) = 2
+                  !
+                  tinc(c,j) = tfrz - t_soisno(c,j)
+                  t_soisno(c,j) = tfrz
+               endif
+            endif   ! end of snow layer if-block
+         end do   ! end of column-loop
+      enddo   ! end of level-loop
+
+      ! the following loop ends at 1st soil-layer, so that it may melt thin snow-layer
+      ! but don't update 1st soil-layer variables
+      do j = -nlevsno+1,1
+         do fc = 1,num_nolakec
+            c = filter_nolakec(fc)
+
+            if ((col_pp%itype(c) /= icol_sunwall .and. col_pp%itype(c) /= icol_shadewall &
+                 .and. col_pp%itype(c) /= icol_roof) .or. ( j <= nlevurb)) then
+
+               if (j >= snl(c)+1) then
+
+                  ! Calculate the energy surplus and loss for melting and freezing
+                  if (imelt(c,j) > 0) then
+
+                     ! added unique cases for this calculation,
+                     ! to account for absorbed solar radiation in each layer
+
+                     !==================================================================
+                     if (j == snl(c)+1) then ! top layer
+                        hm(c,j) = dhsdT(c)*tinc(c,j) - tinc(c,j)/fact(c,j)
+
+                        if ( j==1 .and. frac_h2osfc(c) /= 0.0_r8 ) then
+                           hm(c,j) = hm(c,j) - frac_h2osfc(c)*(dhsdT(c)*tinc(c,j))
+                        end if
+                     else if (j == 1) then
+                        hm(c,j) = (1.0_r8 - frac_sno_eff(c) - frac_h2osfc(c)) &
+                             *dhsdT(c)*tinc(c,j) - tinc(c,j)/fact(c,j)
+                     else ! non-interfacial snow/soil layers
+                        hm(c,j) = - tinc(c,j)/fact(c,j)
+                     endif
+                  endif
+
+                  ! These two errors were checked carefully (Y. Dai).  They result from the
+                  ! computed error of "Tridiagonal-Matrix" in subroutine "thermal".
+                  if (imelt(c,j) == 1 .AND. hm(c,j) < 0._r8) then
+                     hm(c,j) = 0._r8
+                     imelt(c,j) = 0
+                  endif
+                  if (imelt(c,j) == 2 .AND. hm(c,j) > 0._r8) then
+                     hm(c,j) = 0._r8
+                     imelt(c,j) = 0
+                  endif
+
+                  ! The rate of melting and freezing
+
+                  if (imelt(c,j) > 0 .and. abs(hm(c,j)) > 0._r8) then
+                     xm(c,j) = hm(c,j)*dtime/hfus                           ! kg/m2
+
+                     ! If snow exists, but its thickness is less than the critical value
+                     ! (1 cm). Note: more work is needed to determine how to tune the
+                     ! snow depth for this case
+                     if (j == 1) then
+                        if (snl(c)+1 == 1 .AND. h2osno(c) > 0._r8 .AND. xm(c,j) > 0._r8) then
+                           temp1 = h2osno(c)                           ! kg/m2
+                           h2osno(c) = max(0._r8,temp1-xm(c,j))
+                           propor = h2osno(c)/temp1
+                           snow_depth(c) = propor * snow_depth(c)
+                           heatr = hm(c,j) - hfus*(temp1-h2osno(c))/dtime   ! W/m2
+                           if (heatr > 0._r8) then
+                              xm(c,j) = heatr*dtime/hfus                    ! kg/m2
+                              hm(c,j) = heatr                               ! W/m2
+                           else
+                              xm(c,j) = 0._r8
+                              hm(c,j) = 0._r8
+                           endif
+                           qflx_snomelt(c) = max(0._r8,(temp1-h2osno(c)))/dtime   ! kg/(m2 s)
+                           xmf(c) = hfus*qflx_snomelt(c)
+                           qflx_snow_melt(c) = qflx_snomelt(c)
+
+                           ! adding up 1st-soil-layer heat loss for melting thin-snow
+                           eflx_fgr0_snow = eflx_fgr0_snow      &         ! 'eflx_fgr0_snow' must be initialized to 0 or updated before
+                            - max(0._r8, hfus*(temp1-h2osno(c)))/dtime    ! - = out of soil to snow
+
+                        endif
+                     endif
+
+                     ! Don't update for soil-layer, although the loop ending at 1st soil layer which is bottom boundary.
+                     if (j<1) then
+                        heatr = 0._r8
+                        if (xm(c,j) > 0._r8) then
+                           h2osoi_ice(c,j) = max(0._r8, wice0(c,j)-xm(c,j))
+                           heatr = hm(c,j) - hfus*(wice0(c,j)-h2osoi_ice(c,j))/dtime
+                        else if (xm(c,j) < 0._r8) then
+                           h2osoi_ice(c,j) = min(wmass0(c,j), wice0(c,j)-xm(c,j))  ! snow
+                           heatr = hm(c,j) - hfus*(wice0(c,j)-h2osoi_ice(c,j))/dtime
+                        endif
+
+                        h2osoi_liq(c,j) = max(0._r8,wmass0(c,j)-h2osoi_ice(c,j))
+
+                        if (abs(heatr) > 0._r8) then
+                           if (j == snl(c)+1) then
+                              t_soisno(c,j) = t_soisno(c,j) + fact(c,j)*heatr &
+                                   /(1._r8-fact(c,j)*dhsdT(c))
+                           endif
+
+                        else
+                           t_soisno(c,j) = t_soisno(c,j) + fact(c,j)*heatr
+
+                           if (h2osoi_liq(c,j)*h2osoi_ice(c,j)>0._r8) t_soisno(c,j) = tfrz
+
+                        endif  ! end of heatr > 0 if-block
+
+                        xmf(c) = xmf(c) + frac_sno_eff(c)*hfus*(wice0(c,j)-h2osoi_ice(c,j))/dtime
+
+                       if (imelt(c,j) == 1 .AND. j < 1) then
+                           qflx_snomelt(c) = qflx_snomelt(c) + max(0._r8,(wice0(c,j)-h2osoi_ice(c,j)))/dtime
+                       endif
+
+                       ! layer freezing mass flux (positive):
+                       if (imelt(c,j) == 2 .AND. j < 1) then
+                           qflx_snofrz_lyr(c,j) = max(0._r8,(h2osoi_ice(c,j)-wice0(c,j)))/dtime
+                       endif
+
+                     endif  ! j<1
+
+                  endif   ! end of (imelt(c,j) > 0 .and. abs(hm(c,j)) > 0._r8) block
+
+               endif   ! end of snow layer if-block
+
+               ! For glacier_mec columns, compute negative ice flux from melted ice.
+               ! Note that qflx_glcice can also include a positive component from excess snow,
+               ! as computed in HydrologyDrainageMod.F90.
+
+               l = col_pp%landunit(c)
+               if (lun_pp%itype(l)==istice_mec) then
+
+                  if (j>=1 .and. h2osoi_liq(c,j) > 0._r8) then   ! ice layer with meltwater
+                     ! melting corresponds to a negative ice flux
+                     qflx_glcice_melt(c) = qflx_glcice_melt(c) + h2osoi_liq(c,j)/dtime
+                     qflx_glcice(c) = qflx_glcice(c) - h2osoi_liq(c,j)/dtime
+
+                     ! convert layer back to pure ice by "borrowing" ice from below the column
+                     h2osoi_ice(c,j) = h2osoi_ice(c,j) + h2osoi_liq(c,j)
+                     h2osoi_liq(c,j) = 0._r8
+
+                  endif  ! liquid water is present
+               endif     ! istice_mec
+
+            endif   ! end of column-type if-block
+
+         end do   ! end of column-loop
+      enddo   ! end of level-loop
+
+      ! Needed for history file output
+
+      do fc = 1,num_nolakec
+         c = filter_nolakec(fc)
+         eflx_snomelt(c) = qflx_snomelt(c) * hfus
+         l = col_pp%landunit(c)
+         if (lun_pp%urbpoi(l)) then
+            eflx_snomelt_u(c) = eflx_snomelt(c)
+         else if (lun_pp%itype(l) == istsoil .or. lun_pp%itype(l) == istcrop) then
+            eflx_snomelt_r(c) = eflx_snomelt(c)
+         end if
+      end do
+
+      call t_stopf( 'PhaseChangeSnow' )
+
+      do j = -nlevsno+1,0
+         do fc = 1,num_nolakec
+            c = filter_nolakec(fc)
+            qflx_snofrz_col(c) = qflx_snofrz_col(c) + qflx_snofrz_lyr(c,j)
+         end do
+      end do
+
+    end associate
+
+  end subroutine Phasechange_snow
+
+
+  !-----------------------------------------------------------------------
   subroutine ComputeGroundHeatFluxAndDeriv(bounds, num_nolakec, filter_nolakec, &
        hs_h2osfc, hs_top_snow, hs_soil, hs_top, dhsdT, sabg_lyr_col, &
        atm2lnd_vars, urbanparams_vars, canopystate_vars, waterstate_vars, &
@@ -1693,6 +2085,8 @@ end subroutine SolveTemperature
     real(r8) :: eflx_gnet_snow                                         !
     real(r8) :: eflx_gnet_soil                                         !
     real(r8) :: eflx_gnet_h2osfc                                       !
+    real(r8) :: rnet_soil                                              ! net radiation in/out soil/air interface for coupling with PFLOTRAN
+
     !-----------------------------------------------------------------------
 
     ! Enforce expected array sizes
@@ -1723,6 +2117,8 @@ end subroutine SolveTemperature
          t_h2osfc                => temperature_vars%t_h2osfc_col           , & ! Input:  [real(r8) (:)   ]  surface water temperature               
          t_grnd                  => temperature_vars%t_grnd_col             , & ! Input:  [real(r8) (:)   ]  ground surface temperature [K]          
          t_soisno                => temperature_vars%t_soisno_col           , & ! Input:  [real(r8) (:,:) ]  soil temperature (Kelvin)             
+         t_nearsurf_patch        => temperature_vars%t_nearsurf_patch       , & ! Input:  [real(r8) (:)   ]  patch near surface air temperature (Kelvin)
+         t_nearsurf_col          => temperature_vars%t_nearsurf_col         , & ! Output: [real(r8) (:)   ]  col near surface air temperature (Kelvin)
          
          htvp                    => energyflux_vars%htvp_col                , & ! Input:  [real(r8) (:)   ]  latent heat of vapor of water (or sublimation) [j/kg]
          cgrnd                   => energyflux_vars%cgrnd_patch             , & ! Input:  [real(r8) (:)   ]  deriv. of soil energy flux wrt to soil temp [w/m2/k]
@@ -1742,6 +2138,9 @@ end subroutine SolveTemperature
          eflx_gnet               => energyflux_vars%eflx_gnet_patch         , & ! Output: [real(r8) (:)   ]  net ground heat flux into the surface (W/m**2)
          dgnetdT                 => energyflux_vars%dgnetdT_patch           , & ! Output: [real(r8) (:)   ]  temperature derivative of ground net heat flux  
          
+         eflx_fgr0_soil          => energyflux_vars%eflx_fgr0_soil_col      , & ! Output: [real(r8) (:)   ]  col-aggregated heat flux between soil layer 1 and above-air (W/m2)
+         eflx_rnet_soil          => energyflux_vars%eflx_rnet_soil_col      , & ! Output: [real(r8) (:)   ]  col-aggregated radiation flux between soil layer 1 and above-air, excluding SH and LE from Gnet (i.e. radiation form) (W/m2)
+
          sabg                    => solarabs_vars%sabg_patch                , & ! Input:  [real(r8) (:)   ]  solar radiation absorbed by ground (W/m**2)
          sabg_soil               => solarabs_vars%sabg_soil_patch           , & ! Input:  [real(r8) (:)   ]  solar radiation absorbed by soil (W/m**2)
          sabg_snow               => solarabs_vars%sabg_snow_patch           , & ! Input:  [real(r8) (:)   ]  solar radiation absorbed by snow (W/m**2)
@@ -1771,6 +2170,9 @@ end subroutine SolveTemperature
       hs_h2osfc(begc:endc) = 0._r8
       hs(begc:endc)        = 0._r8
       dhsdT(begc:endc)     = 0._r8
+      eflx_rnet_soil(begc:endc) = 0._r8
+      eflx_fgr0_soil(begc:endc) = 0._r8
+      t_nearsurf_col(begc:endc) = 0._r8
       do pi = 1,max_patch_per_col
          do fc = 1,num_nolakec
             c = filter_nolakec(fc)
@@ -1798,6 +2200,12 @@ end subroutine SolveTemperature
                      eflx_gnet_h2osfc = sabg_soil(p) + dlrad(p) &
                           + (1._r8-frac_veg_nosno(p))*emg(c)*forc_lwrad(c) - lwrad_emit_h2osfc(c) &
                           - (eflx_sh_h2osfc(p)+qflx_ev_h2osfc(p)*htvp(c))
+
+                     ! for coupling with PFLOTRAN, as one of BC at soil top (not covered by snow/water),
+                     ! net radiation (excluding SH and LE fluxes btw soil and above) is required.
+                     rnet_soil = sabg_soil(p) + dlrad(p) &
+                        + (1-frac_veg_nosno(p))*emg(c)*forc_lwrad(g) - lwrad_emit_soil(c)
+
                   else
                      ! For urban columns we use the net longwave radiation (eflx_lwrad_net) because of
                      ! interactions between urban columns.
@@ -1822,6 +2230,11 @@ end subroutine SolveTemperature
                      eflx_gnet_snow   = eflx_gnet(p)
                      eflx_gnet_soil   = eflx_gnet(p)
                      eflx_gnet_h2osfc = eflx_gnet(p)
+
+                     ! just in case for coupling with PFLOTRAN
+                     rnet_soil = sabg(p) + dlrad(p)  &
+                                 - eflx_lwrad_net(p) &   ! excluding SH and LE fluxes btw soil and above
+                                 + eflx_wasteheat_patch(p) + eflx_heat_from_ac_patch(p) + eflx_traffic_patch(p)
                   end if
                   dgnetdT(p) = - cgrnd(p) - dlwrad_emit(c)
                   hs(c) = hs(c) + eflx_gnet(p) * veg_pp%wtcol(p)
@@ -1829,6 +2242,17 @@ end subroutine SolveTemperature
                   ! separate surface fluxes for soil/snow
                   hs_soil(c) = hs_soil(c) + eflx_gnet_soil * veg_pp%wtcol(p)
                   hs_h2osfc(c) = hs_h2osfc(c) + eflx_gnet_h2osfc * veg_pp%wtcol(p)
+
+                  ! for couping with PFLOTRAN
+                  ! column-aggregated 'eflx_gnet_soil' for not-ground-covered soil, i.e. G=Rnet-SH-LE
+                  eflx_fgr0_soil(c) = hs_soil(c)
+
+                  ! column-aggregated net radiation for not-ground-covered soil as a possible input (BC) into soil
+                  eflx_rnet_soil(c) = eflx_rnet_soil(c) + rnet_soil * veg_pp%wtcol(p)
+
+                  ! column-aggregated near-surface air temperature as a possible input (BC) for PFLOTRAN cal. its own SH
+                  t_nearsurf_col(c) = t_nearsurf_col(c) + t_nearsurf_patch(p) * veg_pp%wtcol(p)
+
 
                end if
             end if
@@ -1859,6 +2283,16 @@ end subroutine SolveTemperature
                   g = veg_pp%gridcell(p)
                   l = veg_pp%landunit(p)
                   if (.not. lun_pp%urbpoi(l)) then
+
+                     ! F.-M. Yuan (2017-03-21): SNICAR model assumes radiation can penetrate through snow-layers
+                     ! until first soil layer. This assumption may have issue of weakening snow-insulation of ground
+                     ! So the following 'reversing' of 'sabg_lyr' below top to zero and adding up to top
+                     do j=lyr_top,1,1
+                       if (j/=lyr_top) then
+                         sabg_lyr(p,lyr_top) = sabg_lyr(p,lyr_top) + sabg_lyr(p,j)
+                         sabg_lyr(p,j) = 0._r8
+                       endif
+                     enddo
 
                      eflx_gnet_top = sabg_lyr(p,lyr_top) + dlrad(p) + (1._r8-frac_veg_nosno(p))*emg(c)*forc_lwrad(c) &
                           - lwrad_emit(c) - (eflx_sh_grnd(p)+qflx_evap_soi(p)*htvp(c))
@@ -4994,6 +5428,143 @@ end subroutine SolveTemperature
     end associate
 
   end subroutine Prepare_Data_for_EM_PTM_Driver
+
+  !-----------------------------------------------------------------------
+  subroutine SoilThermalPostPflotran(bounds, num_nolakec, filter_nolakec, &
+       urbanparams_vars, waterstate_vars, waterflux_vars,                 &
+       soilstate_vars, energyflux_vars,  temperature_vars)
+    !
+    ! !DESCRIPTION:
+    ! This is the post-PFLOTRAN soil temperature diagnostics, mainly t_grnd, hc_soil, and others.
+    !
+    ! !USES:
+    use clm_time_manager         , only : get_step_size
+    use clm_varpar               , only : nlevsno, nlevgrnd
+    use clm_varcon               , only : cnfac
+    use clm_varctl               , only : iulog
+    use landunit_varcon          , only : istice, istice_mec, istsoil, istcrop
+    use column_varcon            , only : icol_roof, icol_sunwall, icol_shadewall, icol_road_perv, icol_road_imperv
+    use landunit_varcon          , only : istwet, istice, istice_mec, istsoil, istcrop
+
+    ! !ARGUMENTS:
+    type(bounds_type)      , intent(in)    :: bounds
+    integer                , intent(in)    :: num_nolakec                        ! number of column non-lake points in column filter
+    integer                , intent(in)    :: filter_nolakec(:)                  ! column filter for non-lake points
+    type(urbanparams_type) , intent(in)    :: urbanparams_vars
+    type(waterstate_type)  , intent(inout) :: waterstate_vars
+    type(waterflux_type)   , intent(inout) :: waterflux_vars
+    type(soilstate_type)   , intent(inout) :: soilstate_vars
+    type(energyflux_type)  , intent(inout) :: energyflux_vars
+    type(temperature_type) , intent(inout) :: temperature_vars
+    !
+    ! !LOCAL VARIABLES:
+    integer  :: j,c,l,g                                                     ! indices
+    integer  :: fc                                                          ! lake filtered column indices
+    real(r8) :: dtime                                                       ! land model time step (sec)
+    real(r8) :: cv (bounds%begc:bounds%endc,-nlevsno+1:nlevgrnd)            ! heat capacity [J/(m2 K)]
+    real(r8) :: tk (bounds%begc:bounds%endc,-nlevsno+1:nlevgrnd)            ! thermal conductivity [W/(m K)]
+    real(r8) :: tk_h2osfc (bounds%begc:bounds%endc)                         ! thermal conductivity [W/(m K)]
+    !
+    !-----------------------------------------------------------------------
+
+    associate(                                                                &
+         snl                     => col_pp%snl                              , & ! Input:  [integer  (:)   ]  number of snow layers
+         zi                      => col_pp%zi                               , & ! Input:  [real(r8) (:,:) ]  interface level below a "z" level (m)
+         dz                      => col_pp%dz                               , & ! Input:  [real(r8) (:,:) ]  layer depth (m)
+         z                       => col_pp%z                                , & ! Input:  [real(r8) (:,:) ]  layer thickness (m)
+         !
+         frac_sno_eff            => waterstate_vars%frac_sno_eff_col        , & ! Input:  [real(r8) (:)   ]  eff. fraction of ground covered by snow (0 to 1)
+         frac_h2osfc             => waterstate_vars%frac_h2osfc_col         , & ! Input:  [real(r8) (:)   ]  fraction of ground covered by surface water (0 to 1)
+         !
+         t_h2osfc                => temperature_vars%t_h2osfc_col           , & ! Input:  [real(r8) (:)   ]  surface water temperature
+         t_soisno                => temperature_vars%t_soisno_col           , & ! Input:  [real(r8) (:,:) ]  soil temperature (Kelvin)
+         hc_soi                  => temperature_vars%hc_soi_col             , & ! Output: [real(r8) (:)   ]  soil heat content (MJ/m2)               ! TODO: make a module variable
+         hc_soisno               => temperature_vars%hc_soisno_col          , & ! Output: [real(r8) (:)   ]  soil plus snow plus lake heat content (MJ/m2) !TODO: make a module variable
+         t_grnd                  => temperature_vars%t_grnd_col             , & ! Output: [real(r8) (:)   ]  ground surface temperature [K]
+         eflx_fgr12              => energyflux_vars%eflx_fgr12_col          , & ! Output: [real(r8) (:)   ]  heat flux between soil layer 1 and 2 (W/m2)
+         eflx_fgr                => energyflux_vars%eflx_fgr_col            , & ! Output: [real(r8) (:,:) ]  (rural) soil downward heat flux (W/m2) (1:nlevgrnd)
+         !
+         begc                    => bounds%begc                             , &
+         endc                    => bounds%endc                               &
+         )
+
+      ! Get step size
+
+      dtime = get_step_size()
+
+      !
+      !------------------------------------------------------
+      ! Compute ground surface and soil temperatures
+      !------------------------------------------------------
+
+      ! Thermal conductivity and Heat capacity
+
+      tk_h2osfc(begc:endc) = nan
+      call SoilThermProp(bounds, num_nolakec, filter_nolakec, &
+           tk(begc:endc, :), &
+           cv(begc:endc, :), &
+           tk_h2osfc(begc:endc), &
+           urbanparams_vars, temperature_vars, waterstate_vars, soilstate_vars)
+
+      do fc = 1,num_nolakec
+         c = filter_nolakec(fc)
+         ! this expression will (should) work whether there is snow or not
+         if (snl(c) < 0) then
+            if(frac_h2osfc(c) /= 0._r8) then
+               t_grnd(c) = frac_sno_eff(c) * t_soisno(c,snl(c)+1) &
+                    + (1.0_r8 - frac_sno_eff(c) - frac_h2osfc(c)) * t_soisno(c,1) &
+                    + frac_h2osfc(c) * t_h2osfc(c)
+            else
+               t_grnd(c) = frac_sno_eff(c) * t_soisno(c,snl(c)+1) &
+                    + (1.0_r8 - frac_sno_eff(c)) * t_soisno(c,1)
+            end if
+
+         else
+            if(frac_h2osfc(c) /= 0._r8) then
+               t_grnd(c) = (1._r8 - frac_h2osfc(c)) * t_soisno(c,1) + frac_h2osfc(c) * t_h2osfc(c)
+            else
+               t_grnd(c) = t_soisno(c,1)
+            end if
+         endif
+      end do
+
+      ! Initialize soil heat content
+
+      do fc = 1,num_nolakec
+         c = filter_nolakec(fc)
+         l = col_pp%landunit(c)
+         if (.not. lun_pp%urbpoi(l)) then
+            hc_soisno(c) = 0._r8
+            hc_soi(c)    = 0._r8
+         end if
+         !
+         eflx_fgr12(c)= -999._r8 ! not available from pflotran
+         eflx_fgr(c,:)= -999._r8 ! not available from pflotran
+
+
+      end do
+
+      ! Calculate soil heat content and soil plus snow heat content
+
+      do j = -nlevsno+1,nlevgrnd
+         do fc = 1,num_nolakec
+            c = filter_nolakec(fc)
+            l = col_pp%landunit(c)
+
+            if (.not. lun_pp%urbpoi(l)) then
+               if (j >= snl(c)+1) then
+                  hc_soisno(c) = hc_soisno(c) + cv(c,j)*t_soisno(c,j) / 1.e6_r8
+               endif
+               if (j >= 1) then
+                  hc_soi(c) = hc_soi(c) + cv(c,j)*t_soisno(c,j) / 1.e6_r8
+               end if
+            end if
+         end do
+      end do
+
+    end associate
+
+  end subroutine SoilThermalPostPflotran
 
 end module SoilTemperatureMod
 

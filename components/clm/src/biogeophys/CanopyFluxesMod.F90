@@ -382,6 +382,7 @@ contains
          t_veg                => temperature_vars%t_veg_patch              , & ! Output: [real(r8) (:)   ]  vegetation temperature (Kelvin)                                       
          t_ref2m              => temperature_vars%t_ref2m_patch            , & ! Output: [real(r8) (:)   ]  2 m height surface air temperature (Kelvin)                           
          t_ref2m_r            => temperature_vars%t_ref2m_r_patch          , & ! Output: [real(r8) (:)   ]  Rural 2 m height surface air temperature (Kelvin)                     
+         t_nearsurf           => temperature_vars%t_nearsurf_patch         , & ! Output: [real(r8) (:)   ]  mixed air/veg. temperature near surface (for coupling with PFLOTRAN as BC) [Kelvin]
 
          frac_h2osfc          => waterstate_vars%frac_h2osfc_col           , & ! Input:  [real(r8) (:)   ]  fraction of surface water                                             
          fwet                 => waterstate_vars%fwet_patch                , & ! Input:  [real(r8) (:)   ]  fraction of canopy that is wet (0 to 1)                               
@@ -1142,6 +1143,10 @@ contains
 
          delt_soil  = wtal(p)*t_soisno(c,1)-wtl0(p)*t_veg(p)-wta0(p)*thm(p)
          eflx_sh_soil(p) = cpair*forc_rho(c)*wtg(p)*delt_soil
+
+         ! save the mixed 't_veg' and 'thm' (which used above to cal. SH between soil and air under canopy)
+         ! for using as top soil thermal BC for coupling with PFLOTRAN subsurface
+         t_nearsurf(p) = (wtl0(p)*t_veg(p)+wta0(p)*thm(p))/wtal(p)
 
          delt_h2osfc  = wtal(p)*t_h2osfc(c)-wtl0(p)*t_veg(p)-wta0(p)*thm(p)
          eflx_sh_h2osfc(p) = cpair*forc_rho(c)*wtg(p)*delt_h2osfc

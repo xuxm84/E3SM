@@ -1915,12 +1915,6 @@ contains
           if (j <= nlevgrnd) then
             cellcount = gcount*clm_pf_idata%nzclm_mapped + j     ! 1-based
 
-            ! CLM calculation of wet thermal-conductivity as following:
-            ! dksat = tkmg(c,j)*tkwat**(fl*watsat(c,j))*tkice**((1._r8-fl)*watsat(c,j))
-            ! where, fl is the liq. saturation/total saturation
-            ! so, if fl=0, it's the frozen-wet thermal-conductitivity
-            !     if fl=1, it's the liq.-wet thermal-conductivity, i.e. 'tksatu'
-
             tkwet_clm_loc(cellcount )  = &                      !(W/m/K)
                 tkwet_clm_loc(cellcount ) + tkwet(c,j)*wtgcount
             tkdry_clm_loc(cellcount )  = &
@@ -2150,7 +2144,8 @@ contains
                 sattmp = h2osoi_liq(c,j) / (watsat(c,j)*dz(c,j)*denh2o)
                 sattmp = min(max(0.0001d0, sattmp),1._r8)
 
-                if (shr_infnan_isnan(soilpsi(c,j)) .or. nstep<=0) then ! only for initialization, in which CLM did NOT assign a value
+                if (shr_infnan_isnan(soilpsi(c,j)) .or. &
+                    (is_first_step() .or. is_first_restart_step())) then ! only for initialization, in which CLM did NOT assign a value
                     psitmp0 = sucsat(c,j) * (-SHR_CONST_G) * ((sattmp+itheta)**(-bsw(c,j)))  ! -Pa: included both ice and liq. water as CLM does
                     psitmp = denh2o*(-SHR_CONST_G)*(sucsat(c,j)*1.e-3_r8) * ((sattmp+itheta)**(-bsw(c,j)))
                     sucmin_pa = denh2o*SHR_CONST_G*sucmin(c,j)*1.e-3_r8
@@ -2497,14 +2492,14 @@ contains
           qflwt_clmp_loc(cellcount ) = t_nearsurf(gcount+1) - tfrz
 
           if (j .eq. 1) then
-             qfluxw_top_clmp_loc(gcount+1)     = 0.0_r8
-             qfluxev_top_clmp_loc(gcount+1)    = 0.0_r8
-             press_top_clmp_loc(gcount+1)  = press_clms_loc(cellcount)   ! same as the first top layer
+             qfluxw_top_clmp_loc(gcount+1)  = 0.0_r8
+             qfluxev_top_clmp_loc(gcount+1) = 0.0_r8
+             press_top_clmp_loc(gcount+1)   = press_clms_loc(cellcount)   ! same as the first top layer
           end if
 
           if (j .eq. clm_pf_idata%nzclm_mapped) then
-             qfluxw_base_clmp_loc(gcount+1)    = 0.0_r8
-             press_base_clmp_loc(gcount+1) = press_clms_loc((gcount+1)*clm_pf_idata%nzclm_mapped)   ! same as the bottom layer
+             qfluxw_base_clmp_loc(gcount+1) = 0.0_r8
+             press_base_clmp_loc(gcount+1)  = press_clms_loc((gcount+1)*clm_pf_idata%nzclm_mapped)   ! same as the bottom layer
           end if
 
         else

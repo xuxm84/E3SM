@@ -3,6 +3,8 @@
 ./xmlchange CLM_PFLOTRAN_COLMODE=TRUE
 ./xmlchange ATM_DOMAIN_FILE='domain.lnd.fv1.9x2.5_gx1v6.090206_vji.nc'
 ./xmlchange LND_DOMAIN_FILE='domain.lnd.fv1.9x2.5_gx1v6.090206_vji.nc'
+./xmlchange CLM_INTERFACE_MODE=pflotran
+
 
 DIN_LOC_ROOT=$(./xmlquery DIN_LOC_ROOT -value)
 RUNDIR=$(./xmlquery RUNDIR -value)

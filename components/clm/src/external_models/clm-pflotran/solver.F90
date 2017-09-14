@@ -1290,6 +1290,9 @@ subroutine SolverLinearPrintFailedReason(solver,option)
           call printErrMsg(option)
         endif
       endif
+#if PETSC_VERSION_GT(3,7,3)
+      !(N.B. 'PCFactorGetZeroPivot()' ONLY available after v3.7.3, 
+
       ! have to perform global reduction (again) on pc_failed_reason
       temp_int = pc_failed_reason
       call MPI_Allreduce(MPI_IN_PLACE,temp_int,ONE_INTEGER_MPI, &
@@ -1306,7 +1309,11 @@ subroutine SolverLinearPrintFailedReason(solver,option)
           call PCFactorGetZeroPivot(pc,zero_pivot_tol, &
                                     ierr);CHKERRQ(ierr)
           write(word,*) zero_pivot_tol
-#if PETSC_VERSION_GT(3,7,3)
+#if PETSC_VERSION_GT(3,7,6)
+          !(N.B. 'MatFactorGetZeroPivot()' ONLY workable after v3.7.6, 
+          !      which actually is tag xsdk-0.2.0 and later, 
+          !      and VERSIONED as v3.7.5-non-released)
+          
           ! In parallel, some processes will not have a zero pivot and
           ! will report zero as the error.  We must skip these processes.
           zero_pivot = 1.d20
@@ -1324,7 +1331,7 @@ subroutine SolverLinearPrintFailedReason(solver,option)
           option%io_buffer = 'PC Setup failed for ' // trim(string) // &
             '. The ' // trim(string) // ' preconditioner zero pivot &
             &tolerance (' // trim(adjustl(word)) // &
-#if PETSC_VERSION_GT(3,7,3)
+#if PETSC_VERSION_GT(3,7,6)
             ') is too large due to a zero pivot of ' // &
             trim(adjustl(word2)) // '. Please set a ZERO_PIVOT_TOL smaller &
             &than that value or email pflotran-dev@googlegroups.com with &
@@ -1336,6 +1343,7 @@ subroutine SolverLinearPrintFailedReason(solver,option)
 #endif
           call printErrMsg(option)
       end select
+#endif
     case default
       write(option%io_buffer,'('' -> KSPReason: Unknown: '',i2)') &
         ksp_reason

@@ -12,6 +12,12 @@ module dimensions_mod
 ! set MAX number of tracers.  actual number of tracers is a run time argument  
 #ifdef CAM
 #else
+
+! balu when making theta-l-nlev60,  ./test_execs/theta-l-nlev60/config.h has #define QSIZE_D 4
+! but at runtime we need qsize to be 5 for bcwave 2016 testcase
+! so as a hack, redefine QSIZE_D to be 5 as in the line below
+
+#define QSIZE_D 5 
 #ifdef QSIZE_D
   integer, parameter         :: qsize_d=QSIZE_D
 #else

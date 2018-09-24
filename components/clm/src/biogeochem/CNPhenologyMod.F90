@@ -2519,7 +2519,19 @@ contains
                   frootp_to_litter(p)  = max(min(frootc_to_litter(p)/max(frootc(p), 1.e-20_r8) * frootp(p), t1 * frootp(p)),0._r8)
                end if
             end if
- 
+            leafc_to_litter(p) = max(leafc_to_litter(p),0._r8)
+            leafn_to_litter(p) = max(leafn_to_litter(p),0._r8) 
+            leafp_to_litter(p) = max(leafp_to_litter(p),0._r8)
+
+            frootc_to_litter(p)= max(frootc_to_litter(p),0._r8)
+            frootn_to_litter(p)= max(frootn_to_litter(p),0._r8)
+            frootp_to_litter(p)= max(frootp_to_litter(p),0._r8)
+
+            if (ivt(p) >= npcropmin) then
+              livestemc_to_litter(p)=max(livestemc_to_litter(p),0._r8)
+              livestemn_to_litter(p)=max(livestemn_to_litter(p),0._r8)
+              livestemp_to_litter(p)=max(livestemp_to_litter(p),0._r8)
+            endif 
             ! save the current litterfall fluxes
             prev_leafc_to_litter(p)  = leafc_to_litter(p)
             prev_frootc_to_litter(p) = frootc_to_litter(p)
@@ -2630,6 +2642,13 @@ contains
                ! calculate fine root P litterfall (no retranslocation of fine root P)
                frootp_to_litter(p) = bglfr_froot(p) * frootp(p) ! fine root P retranslocation occur (but not N retranslocation), why not include it here
             end if
+            leafc_to_litter(p)=max(leafc_to_litter(p),0._r8)
+            leafn_to_litter(p)=max(leafn_to_litter(p),0._r8)
+            leafp_to_litter(p)=max(leafp_to_litter(p),0._r8)
+
+            frootc_to_litter(p)=max(frootc_to_litter(p),0._r8)
+            frootn_to_litter(p)=max(frootn_to_litter(p),0._r8)
+            frootp_to_litter(p)=max(frootp_to_litter(p),0._r8)
          end if
       end do
 
